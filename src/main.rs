@@ -15,6 +15,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use url::Url;
+use std::time::Instant;
 
 fn px_to_mm(px: f32) -> f32 {
     // mm = ( pixels * 25.4 ) / DPI
@@ -79,6 +80,7 @@ struct Args {
 }
 
 fn main() {
+    let program_time = Instant::now();
     // 1
     let args = Args::parse();
     let url = args.url.clone();
@@ -133,6 +135,7 @@ fn main() {
     let mut images_path: Vec<PathBuf> = Vec::new();
     let _ = fs::create_dir_all(folder_chapter.clone());
     println!("we'll start fetching images");
+    let fetching_time = Instant::now();
     for (i, image_url) in urss.iter().enumerate() {
         let response = fetch(&image_url.as_str().to_string()).expect("error no fetch");
         let bytes = response.bytes().expect("error on parsing images bytes");
@@ -141,6 +144,7 @@ fn main() {
         println!("image {} saved on disk.", i);
         images_path.push(path);
     }
+    println!("all the fetch ellpased {} seconds", fetching_time.elapsed().as_secs());
     // images_path = fs::read_dir(folder_chapter).unwrap().map(|x| x.unwrap().path()).collect();
 
     // 4
@@ -148,7 +152,7 @@ fn main() {
     println!("we got all the images, now the pdf");
     let mut ub_final = File::create("test.pdf").expect("create file");
     create_pdf(&mut ub_final, &chap_name, &images_path);
-    println!("finish");
+    println!("finish in {} seconds", program_time.elapsed().as_secs());
 }
 
 use printpdf::{Mm, Op, PdfDocument, PdfPage, PdfWarnMsg, Pt, RawImage, XObjectTransform};
