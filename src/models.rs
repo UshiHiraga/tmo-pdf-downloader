@@ -4,7 +4,7 @@ use thiserror::Error;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manga {
     // This info is extracted from the url.
-    pub index: String,
+    pub index: u32,
     // This info is extracted from the html file.
     pub title: String,
     pub chapters: Vec<Chapter>,
