@@ -1,30 +1,27 @@
-use crate::models::{Chapter, Manga, View};
-use std::fs;
-use url::Url;
+use crate::errors::{CacheError, ContentTypeError};
 use chrono::Utc;
-use thiserror::Error;
 use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use url::Url;
 
-#[derive(Error, Debug)]
-pub enum CacheError {
-    #[error("Could not read the cache directory: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("Cache for this manga does not exist or is not valid.")]
-    CacheNotFound,
-
-    #[error("The cache file is expired.")]
-    CacheExpired,
-
-    #[error("Failed to parse JSON content: {0}")]
-    Parse(#[from] serde_json::Error),
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Manga {
+    // This info is extracted from the url.
+    pub content_type: ContentType,
+    pub index: u32,
+    pub normalized_title: String,
+    // This info is extracted from the html file.
+    pub title: String,
+    pub chapters: Vec<Chapter>,
 }
 
 impl Manga {
     /// Extracts info from the url and body of a manga html page.
     /// TODO: Implement err path.
-    pub fn from_html(index: String, html: String) -> Result<Manga, ()> {
+    pub fn from_html(url: Url, html: String) -> Result<Manga, ()> {
         let document = Html::parse_document(&html);
 
         // Extracts title from the body.
@@ -63,8 +60,18 @@ impl Manga {
             chapters.push(Chapter { name, views });
         }
 
+        // Get the path segments
+        let segments: Vec<&str> = match url.path_segments() {
+            Some(s) => s.collect(),
+            None => {
+                panic!("url should be valid");
+            }
+        };
+
         return Ok(Manga {
-            index,
+            content_type: ContentType::from_str(segments[1]).unwrap(),
+            index: segments[2].parse::<u32>().unwrap(),
+            normalized_title: segments[3].to_string(),
             title,
             chapters,
         });
@@ -77,6 +84,7 @@ impl Manga {
         let fifteen_days_in_seconds: u64 = 15 * 24 * 3600;
 
         let cache_folder_entries = fs::read_dir(cache)?;
+
         for entry in cache_folder_entries {
             let path = entry?.path();
 
@@ -131,29 +139,37 @@ impl Manga {
     }
 }
 
-/// Extract info from body of a paginated html page.
-pub fn html_paginated_json(html: String) -> Result<Vec<Url>, ()> {
-    // First part of the url
-    let search_string = "var dirPath = '";
-    let start_index = html.find(search_string).unwrap();
-    let after_start = start_index + search_string.len();
-    let end_index = html[after_start..].find("'").unwrap();
-    let full_end_index = after_start + end_index;
-    let extract_url = &html[after_start..full_end_index];
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ContentType {
+    Manga,
+    Manhua,
+    Manhwa,
+    Novela,
+    WebNovel,
+    OneShot,
+    Doujinshi,
+    Oel,
+}
 
-    // Second extract ulist
-    let start_delimiter = "JSON.parse('[";
-    let end_delimiter = "]');";
+impl FromStr for ContentType {
+    type Err = ContentTypeError;
 
-    let start_ix = html.find(start_delimiter).unwrap();
-    let after_start_2 = start_ix + start_delimiter.len();
-    let end_ix = html[after_start_2..].find(end_delimiter).unwrap();
-    let text_list = &html[after_start_2..after_start_2 + end_ix].replace("\"", "");
-    let vec_names = text_list.split(",");
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "manga" => Ok(Self::Manga),
+            _ => Err(ContentTypeError),
+        }
+    }
+}
 
-    let urls: Vec<Url> = vec_names
-        .map(|nombre| format!("{}{}", extract_url, nombre))
-        .map(|url_tex| Url::parse(&url_tex).expect("parse error"))
-        .collect();
-    return Ok(urls);
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Chapter {
+    pub name: String,
+    pub views: Vec<View>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct View {
+    pub scan: String,
+    pub link: String,
 }
