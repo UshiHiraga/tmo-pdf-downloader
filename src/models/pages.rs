@@ -7,7 +7,13 @@ impl ChapterParser {
     // Extract info from body of a paginated html page.
     pub fn get_images(html: &str) -> Result<Vec<Url>, ()> {
         // implement cascade image
-        return Self::paginated(html);
+
+        if html.contains("var dirPath = '") {
+            //Implement more secure detection
+            return Self::paginated(html);
+        } else {
+            return Self::cascade(html);
+        }
     }
 
     fn paginated(html: &str) -> Result<Vec<Url>, ()> {
@@ -33,6 +39,23 @@ impl ChapterParser {
             .map(|nombre| format!("{}{}", extract_url, nombre))
             .map(|url_tex| Url::parse(&url_tex).expect("parse error"))
             .collect();
+        return Ok(urls);
+    }
+
+    fn cascade(html: &str) -> Result<Vec<Url>, ()> {
+        let document = Html::parse_document(html);
+
+        let image_selector = Selector::parse("img.viewer-img").unwrap();
+        let images = document.select(&image_selector);
+        let mut urls: Vec<Url> = Vec::new();
+
+        for image in images {
+            let url_text = image.attr("data-src").unwrap();
+            let url_obj = Url::parse(&url_text).unwrap();
+
+            urls.push(url_obj);
+        }
+
         return Ok(urls);
     }
 }
