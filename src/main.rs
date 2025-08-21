@@ -221,14 +221,7 @@ fn main() {
         println!("image {} saved on disk.", i);
         images_path.push(path);
     }
-    println!(
-        "all the fetch ellpased {} seconds",
-        fetching_time.elapsed().as_secs()
-    );
-    images_path = fs::read_dir(folder_chapter)
-        .unwrap()
-        .map(|x| x.unwrap().path())
-        .collect();
+    println!("all the fetch ellpased {} seconds",fetching_time.elapsed().as_secs());
 
     // 4
     // crea el pdf
