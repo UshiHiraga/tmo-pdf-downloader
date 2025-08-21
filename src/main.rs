@@ -67,9 +67,6 @@ struct Args {
     #[arg(value_enum, long, default_value_t = FormatOutput::Pdf)]
     format: FormatOutput,
 
-    #[arg(value_enum, long, default_value_t = Language::Spanish)]
-    language: Language,
-
     /// Avoid reading or writing to cache.
     #[arg(long)]
     no_cache: bool,
@@ -81,12 +78,6 @@ enum FormatOutput {
     Images,
 }
 
-#[derive(Clone, ValueEnum)]
-enum Language {
-    Spanish,
-    English,
-    Portuguese,
-}
 
 #[derive(Debug, Clone)]
 enum MangaId {
