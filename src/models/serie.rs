@@ -144,8 +144,7 @@ pub enum ContentType {
     Manga,
     Manhua,
     Manhwa,
-    Novela,
-    WebNovel,
+    Novel,
     OneShot,
     Doujinshi,
     Oel,
@@ -157,6 +156,12 @@ impl FromStr for ContentType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "manga" => Ok(Self::Manga),
+            "manhua" => Ok(Self::Manhua),
+            "manhwa" => Ok(Self::Manhwa),
+            "novel" => Ok(Self::Novel),
+            "one_shot" => Ok(Self::OneShot),
+            "doujinshi" => Ok(Self::Doujinshi),
+            "oel" => Ok(Self::Oel),
             _ => Err(ContentTypeError),
         }
     }
