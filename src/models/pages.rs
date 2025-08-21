@@ -5,7 +5,7 @@ pub struct ChapterParser;
 
 impl ChapterParser {
     // Extract info from body of a paginated html page.
-    fn get_images(html: &str) -> Result<Vec<Url>, ()> {
+    pub fn get_images(html: &str) -> Result<Vec<Url>, ()> {
         // implement cascade image
         return Self::paginated(html);
     }
