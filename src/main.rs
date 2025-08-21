@@ -1,21 +1,23 @@
+mod errors;
 mod models;
 mod utils;
-use models::CliError;
-use models::Manga;
+use models::serie::Manga;
+use models::pages::ChapterParser;
 use printpdf::PdfSaveOptions;
-use utils::io::get_manga_cache;
-use utils::io::set_manga_cache;
-use utils::network::fetch;
-use utils::parser::html_paginated_json;
-use utils::parser::manga_html_to_json;
+
+use utils::fetch;
 
 use clap::Parser;
+use clap::ValueEnum;
+use clap::error as ClapError;
+
 use dirs::cache_dir;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use url::Url;
+
 use std::time::Instant;
+use url::Url;
 
 fn px_to_mm(px: f32) -> f32 {
     // mm = ( pixels * 25.4 ) / DPI
@@ -27,111 +29,186 @@ fn get_cache_path() -> PathBuf {
     cache_path.join("tmo-pdf-downloader")
 }
 
-fn extract_id_from_url(input: &str) -> Result<u32, CliError> {
-    let url = match Url::parse(input) {
-        Ok(u) => u,
-        Err(e) => return Err(CliError::InvalidUrl(e.to_string())),
-    };
-
-    match url.host_str() {
-        Some(host) => {
-            if host != "zonatmo.com" {
-                return Err(CliError::InvalidMangaUrl);
-            }
-        }
-        None => return Err(CliError::InvalidMangaUrl),
-    }
-
-    let segments: Vec<&str> = match url.path_segments() {
-        Some(segments) => segments.collect(),
-        None => return Err(CliError::MissingId),
-    };
-
-    if segments.len() < 2 {
-        return Err(CliError::MissingId);
-    }
-
-    if segments[0] != "library" {
-        return Err(CliError::InvalidMangaUrl);
-    }
-
-    let manga_id = match segments[2].parse::<u32>() {
-        Ok(res) => res,
-        Err(_) => return Err(CliError::InvalidMangaUrl),
-    };
-
-    return Ok(manga_id);
-}
-
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(short, long, group = "source")]
-    url: Option<String>,
+    /// ID del manga o manwha a descargar
+    #[arg(required = true, value_parser = MangaId::from_str )]
+    id: MangaId,
 
-    #[arg(short, long, group = "source")]
-    index: Option<u32>,
+    // El grupo de argumentos para la selección de capítulos
+    /// Número de capítulo a descargar
+    #[arg(short, long, group = "selection")]
+    chapter: Option<u32>,
 
-    #[arg(short, long)]
-    chapter_index: Option<u32>, // chapter index
+    /// Rango de capítulos a descargar (ej: 10-15, 25-end)
+    #[arg(short, long, group = "selection")]
+    range: Option<String>,
 
-    #[arg(short, long)]
+    /// Descargar todos los capítulos disponibles
+    #[arg(short, long, group = "selection")]
+    all: bool,
+
+    /// Descargar solo el último capítulo disponible (por defecto si no se especifica nada)
+    #[arg(
+        short,
+        long,
+        group = "selection",
+        default_value_t = true,
+        default_missing_value = "true"
+    )]
+    last: bool,
+
+    /// Ruta de salida para los archivos descargados
+    #[arg(short, long, value_name = "PATH")]
+    output: Option<String>,
+
+    /// Output file.
+    #[arg(value_enum, long, default_value_t = FormatOutput::Pdf)]
+    format: FormatOutput,
+
+    #[arg(value_enum, long, default_value_t = Language::Spanish)]
+    language: Language,
+
+    /// Avoid reading or writing to cache.
+    #[arg(long)]
     no_cache: bool,
+}
+
+#[derive(Clone, ValueEnum)]
+enum FormatOutput {
+    Pdf,
+    Images,
+}
+
+#[derive(Clone, ValueEnum)]
+enum Language {
+    Spanish,
+    English,
+    Portuguese,
+}
+
+#[derive(Debug, Clone)]
+enum MangaId {
+    FromIndex(u32),
+    FromUrl(url::Url, u32),
+}
+
+impl MangaId {
+    fn from_str(s: &str) -> Result<Self, ClapError::Error> {
+        // Try to parse as a numeric ID.
+        if let Ok(index) = s.parse::<u32>() {
+            return Ok(MangaId::FromIndex(index));
+        };
+
+        // If it's not a number, try to parse as a URL.
+        let url = match Url::parse(s) {
+            Ok(u) => u,
+            Err(_) => {
+                return Err(ClapError::Error::raw(
+                    ClapError::ErrorKind::InvalidValue,
+                    "The value must be a numeric ID or a valid URL.",
+                ));
+            }
+        };
+
+        // Validate the URL host
+        if url.host_str() != Some("zonatmo.com") {
+            return Err(ClapError::Error::raw(
+                ClapError::ErrorKind::InvalidValue,
+                "The URL is not from zonatmo.com.",
+            ));
+        };
+
+        // Get the path segments
+        let segments: Vec<&str> = match url.path_segments() {
+            Some(s) => s.collect(),
+            None => {
+                return Err(ClapError::Error::raw(
+                    ClapError::ErrorKind::InvalidValue,
+                    "The TMO URL must have a path with segments.",
+                ));
+            }
+        };
+
+        // Validate the path structure and extract the ID
+        if segments.len() < 4 || segments[0] != "library" {
+            return Err(ClapError::Error::raw(
+                ClapError::ErrorKind::InvalidValue,
+                "Invalid URL format. It should be similar to https://zonatmo.com/library/manga/12345/name.",
+            ));
+        };
+
+        let manga_id = match segments[2].parse::<u32>() {
+            Ok(res) => res,
+            Err(_) => {
+                return Err(ClapError::Error::raw(
+                    ClapError::ErrorKind::InvalidValue,
+                    "The URL does not contain a valid numeric manga ID.",
+                ));
+            }
+        };
+
+        return Ok(MangaId::FromUrl(url, manga_id));
+    }
 }
 
 fn main() {
     let program_time = Instant::now();
     // 1
     let args = Args::parse();
-    let url = args.url.clone();
-    let manga_index = match (args.url, args.index) {
-        (None, None) => unreachable!(),
-        (Some(_), Some(_)) => unreachable!(),
-        (Some(url), None) => extract_id_from_url(&url).expect("The url did not contain the index"),
-        (None, Some(index)) => index,
-    };
 
-    println!("{:?}", manga_index);
-    println!("{:?}", args.no_cache);
-
-    // 2
-    // Check location on cache
     let cache_path = get_cache_path();
-    // is manga cached?
-    let manga: Manga = match get_manga_cache(&cache_path, &manga_index.to_string()) {
-        Ok(res) => {
-            println!("Got from cache");
-            res
+
+    let manga: Manga = match args.id {
+        MangaId::FromIndex(index) => {
+            if args.no_cache {
+                panic!("we cant get from cache.");
+            }
+
+            match Manga::from_cache(&cache_path, &index.to_string()) {
+                Ok(manga) => {
+                    println!("Got from cache");
+                    manga
+                }
+                Err(_) => {
+                    panic!("{}", "no cache");
+                }
+            }
         }
-        Err(_) => {
+        MangaId::FromUrl(url, index) => {
             println!("Caché no encontrada. Haciendo fetch de los datos.");
-            let response = fetch(&url.unwrap().to_string()).expect("Error on fecth");
+            let response = fetch(&url.to_string()).expect("Error on fecth");
             let html_file = response.text().expect("Incorrect body");
-            let manga =
-                manga_html_to_json(manga_index.to_string(), html_file).expect("error on parsing");
-            let _ = set_manga_cache(&cache_path, &manga_index.to_string(), &manga);
+            let manga = Manga::from_html(url, html_file).expect("error on parsing");
+
+            if !args.no_cache {
+                let _ = manga.to_cache(&cache_path, &index.to_string());
+            }
+
             manga
         }
     };
 
-    // 3  https://zonatmo.com/view_uploads/1650650
-    // as no chapter still, we'll take first
-    // this can fail if one_shot
-    let chap_index: usize = match args.chapter_index {
-        Some(res) => res as usize,
-        None => 0,
-    };
+    // // as no chapter still, we'll take first
+    // // this can fail if one_shot
+    // let chap_index: usize = match args.chapter_index {
+    //     Some(res) => res as usize,
+    //     None => 0,
+    // };
 
+    let chap_index: usize = 0;
     println!("chapter selected had the index {}", chap_index);
 
     let url_chap_view = &manga.chapters[chap_index].views[0].link;
     let chap_name = &manga.chapters[chap_index].name;
     let ss = fetch(&url_chap_view).unwrap().text().unwrap();
-    let urss = html_paginated_json(ss).unwrap(); //implemet 
+    let _ = fs::write("test.html", &ss);
+    let urss = ChapterParser::get_images(&ss).unwrap();
     println!("we got the urls for the chapter");
 
     // Itera sobre las url y trata de descargar las imagenes.
-    let folder_chapter = cache_path.join(manga_index.to_string()).join(chap_name);
+    let folder_chapter = cache_path.join(manga.index.to_string()).join(chap_name);
     let mut images_path: Vec<PathBuf> = Vec::new();
     let _ = fs::create_dir_all(folder_chapter.clone());
     println!("we'll start fetching images");
@@ -144,8 +221,14 @@ fn main() {
         println!("image {} saved on disk.", i);
         images_path.push(path);
     }
-    println!("all the fetch ellpased {} seconds", fetching_time.elapsed().as_secs());
-    // images_path = fs::read_dir(folder_chapter).unwrap().map(|x| x.unwrap().path()).collect();
+    println!(
+        "all the fetch ellpased {} seconds",
+        fetching_time.elapsed().as_secs()
+    );
+    images_path = fs::read_dir(folder_chapter)
+        .unwrap()
+        .map(|x| x.unwrap().path())
+        .collect();
 
     // 4
     // crea el pdf
