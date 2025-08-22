@@ -1,83 +1,132 @@
-use crate::errors::{CacheError, ContentTypeError};
+use crate::errors::{CacheError, SerieParseError};
 use chrono::Utc;
-use scraper::{Html, Selector};
+use regex::Regex;
+use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use url::Url;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SerieUrlInfo {
+    pub url: String,
+    pub index: u32,
+    pub slug: String,
+    pub is_oneshot: bool,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Manga {
+pub struct Serie {
     // This info is extracted from the url.
-    pub content_type: ContentType,
-    pub index: u32,
-    pub normalized_title: String,
+    pub url_info: SerieUrlInfo,
     // This info is extracted from the html file.
     pub title: String,
     pub chapters: Vec<Chapter>,
 }
 
-impl Manga {
+
+impl Serie {
     /// Extracts info from the url and body of a manga html page.
-    /// TODO: Implement err path.
-    pub fn from_html(url: Url, html: String) -> Result<Manga, ()> {
+    pub fn from_html(url_info: SerieUrlInfo, html: &str) -> Result<Serie, SerieParseError> {
         let document = Html::parse_document(&html);
 
         // Extracts title from the body.
-        let title_selector = Selector::parse("h1.element-title").unwrap();
-        let title_node = document.select(&title_selector).next().unwrap();
-        let title = title_node.text().next().unwrap().trim().to_string();
+        let title_selector = Selector::parse("h1.element-title").expect("Selector is hardcoded.");
+        let Some(title_node) = document.select(&title_selector).next() else {
+            return Err(SerieParseError::MissingTitle);
+        };
+        let title = match title_node.text().next() {
+            Some(text) => text.trim().to_string(),
+            None => return Err(SerieParseError::MissingTitle),
+        };
+
+        // If the serie is a one_shot we must extract providers in a different way.
+        if url_info.is_oneshot {
+            let providers_selector =
+                Selector::parse("li.list-group-item").expect("Selector is hardcoded.");
+            let provider_nodes = document.select(&providers_selector);
+
+            let providers: Vec<Provider> = provider_nodes
+                .filter_map(|j| Provider::from_oneshot_provider_fragment(j).ok())
+                .collect();
+
+            let chapters = vec![Chapter {
+                number: (0, 0),
+                name: title.clone(),
+                providers,
+            }];
+
+            return Ok(Serie {
+                url_info,
+                title,
+                chapters,
+            });
+        }
 
         // Extracts chapters from the body.
-        let chapters_selector = Selector::parse("div#chapters li.upload-link").unwrap();
+        let chapters_selector =
+            Selector::parse("div#chapters li.upload-link").expect("Selector is hardcoded.");
         let chapters_nodes = document.select(&chapters_selector);
         let mut chapters: Vec<Chapter> = Vec::new();
 
-        for chapter_node in chapters_nodes {
+        for chapter_node in chapters_nodes.rev() {
             // Extracts chapter's title.
-            let name_selector = Selector::parse("h4 a").unwrap();
-            let name_node = chapter_node.select(&name_selector).next().unwrap();
-            let name = name_node.text().last().unwrap().trim().to_string();
+            let name_selector = Selector::parse("h4 a").expect("Selector is hardcoded.");
+            let Some(name_node) = chapter_node.select(&name_selector).next() else {
+                return Err(SerieParseError::MissingTitle);
+            };
+            let name = match name_node.text().next() {
+                Some(text) => text.trim().to_string(),
+                None => return Err(SerieParseError::MissingTitle),
+            };
+
+            // Parses title to extract number
+            let regex = Regex::new(r"Capítulo\s+(\d+)\.(\d+)").expect("Regex is hardcoded.");
+            let Some(numbers) = regex.captures(&name) else {
+                return Err(SerieParseError::MissingTitle);
+            };
+            let Ok(complete_part) = numbers
+                .get(1)
+                .expect("It selects the first capture group.")
+                .as_str()
+                .parse::<u32>()
+            else {
+                return Err(SerieParseError::MissingTitle);
+            };
+            let Ok(decimal_part) = numbers
+                .get(2)
+                .expect("It selects the second capture group.")
+                .as_str()
+                .parse::<u32>()
+            else {
+                return Err(SerieParseError::MissingTitle);
+            };
+
+            let number = (complete_part, decimal_part);
 
             // Extracts providers of the chapter.
-            let providers_selector = Selector::parse("li.list-group-item").unwrap();
+            let providers_selector =
+                Selector::parse("li.list-group-item").expect("Selector is hardcoded.");
             let providers_nodes = chapter_node.select(&providers_selector);
-            let mut views: Vec<View> = Vec::new();
 
-            for provider_node in providers_nodes {
-                let a_selector = Selector::parse("a").unwrap();
-                let a_nodes = provider_node.select(&a_selector);
+            let providers: Vec<Provider> = providers_nodes
+                .filter_map(|j| Provider::from_serie_provider_fragment(j).ok())
+                .collect();
 
-                let scan_name = a_nodes.clone().next().unwrap().text().next().unwrap();
-                let url_view = a_nodes.clone().last().unwrap().attr("href").unwrap();
-                views.push(View {
-                    scan: scan_name.to_string(),
-                    link: url_view.to_string(),
-                });
-            }
-
-            chapters.push(Chapter { name, views });
+            chapters.push(Chapter {
+                number,
+                name,
+                providers,
+            });
         }
 
-        // Get the path segments
-        let segments: Vec<&str> = match url.path_segments() {
-            Some(s) => s.collect(),
-            None => {
-                panic!("url should be valid");
-            }
-        };
-
-        return Ok(Manga {
-            content_type: ContentType::from_str(segments[1]).unwrap(),
-            index: segments[2].parse::<u32>().unwrap(),
-            normalized_title: segments[3].to_string(),
+        return Ok(Serie {
+            url_info,
             title,
             chapters,
         });
     }
 
-    pub fn from_cache(cache: &Path, index: &str) -> Result<Manga, CacheError> {
+    pub fn from_cache(cache: &Path, index: &str) -> Result<Serie, CacheError> {
         let mut latest_file_path: Option<PathBuf> = None;
         let mut latest_timestamp: u64 = 0;
         let current_timestamp = Utc::now().timestamp() as u64;
@@ -140,41 +189,64 @@ impl Manga {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum ContentType {
-    Manga,
-    Manhua,
-    Manhwa,
-    Novel,
-    OneShot,
-    Doujinshi,
-    Oel,
-}
-
-impl FromStr for ContentType {
-    type Err = ContentTypeError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "manga" => Ok(Self::Manga),
-            "manhua" => Ok(Self::Manhua),
-            "manhwa" => Ok(Self::Manhwa),
-            "novel" => Ok(Self::Novel),
-            "one_shot" => Ok(Self::OneShot),
-            "doujinshi" => Ok(Self::Doujinshi),
-            "oel" => Ok(Self::Oel),
-            _ => Err(ContentTypeError),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct Chapter {
+    pub number: (u32, u32),
     pub name: String,
-    pub views: Vec<View>,
+    pub providers: Vec<Provider>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct View {
+pub struct Provider {
     pub scan: String,
     pub link: String,
+}
+
+impl Provider {
+    fn from_oneshot_provider_fragment(frag: ElementRef) -> Result<Self, SerieParseError> {
+        // Extract scan info.
+        let scan_selector = Selector::parse("span").expect("Selector is hardcoded.");
+        let Some(scan_node) = frag.select(&scan_selector).next() else {
+            return Err(SerieParseError::MissingScan);
+        };
+        let scan = match scan_node.text().next() {
+            Some(text) => text.trim().to_string(),
+            None => return Err(SerieParseError::MissingScan),
+        };
+
+        // Extract view url.
+        let a_selector = Selector::parse("a").expect("Selector is hardcoded.");
+        let Some(a_node) = frag.select(&a_selector).next() else {
+            return Err(SerieParseError::MissingScan);
+        };
+        let link = match a_node.attr("href") {
+            Some(text) => text.to_string(),
+            None => return Err(SerieParseError::MissingScan),
+        };
+
+        return Ok(Provider { scan, link });
+    }
+
+    fn from_serie_provider_fragment(frag: ElementRef) -> Result<Self, SerieParseError> {
+        let a_selector = Selector::parse("a").expect("Selector is hardcoded.");
+
+        // Extract scan info.
+        let Some(scan_node) = frag.select(&a_selector).next() else {
+            return Err(SerieParseError::MissingScan);
+        };
+        let scan = match scan_node.text().next() {
+            Some(text) => text.trim().to_string(),
+            None => return Err(SerieParseError::MissingScan),
+        };
+
+        // Extract view url.
+        let Some(link_node) = frag.select(&a_selector).last() else {
+            return Err(SerieParseError::MissingScan);
+        };
+        let link = match link_node.attr("href") {
+            Some(text) => text.to_string(),
+            None => return Err(SerieParseError::MissingScan),
+        };
+
+        return Ok(Provider { scan, link });
+    }
 }

@@ -15,5 +15,10 @@ pub enum CacheError {
     Parse(#[from] serde_json::Error),
 }
 
-#[derive(Debug)]
-pub struct ContentTypeError;
+#[derive(Error, Debug)]
+pub enum SerieParseError {
+    #[error("Document do not contain title element.")]
+    MissingTitle,
+    #[error("Fragment parsed do not contain scan name element.")]
+    MissingScan,
+}

@@ -2,7 +2,7 @@ mod errors;
 mod models;
 mod utils;
 use models::pages::ChapterParser;
-use models::serie::Manga;
+use models::serie::{Serie, SerieUrlInfo};
 use printpdf::PdfSaveOptions;
 
 use utils::fetch;
@@ -34,7 +34,7 @@ fn get_cache_path() -> PathBuf {
 struct Args {
     /// ID del manga o manwha a descargar
     #[arg(required = true, value_parser = parse_url )]
-    id: (u32, Option<PartialManga>),
+    id: (u32, Option<SerieUrlInfo>),
 
     // El grupo de argumentos para la selección de capítulos
     /// Número de capítulo a descargar
@@ -78,12 +78,7 @@ enum FormatOutput {
     Images,
 }
 
-#[derive(Clone)]
-struct PartialManga {
-    url: Url,
-}
-
-fn parse_url(s: &str) -> Result<(u32, Option<PartialManga>), ClapError::Error> {
+fn parse_url(s: &str) -> Result<(u32, Option<SerieUrlInfo>), ClapError::Error> {
     // Try to parse as a numeric ID.
     if let Ok(index) = s.parse::<u32>() {
         return Ok((index, None));
@@ -127,7 +122,7 @@ fn parse_url(s: &str) -> Result<(u32, Option<PartialManga>), ClapError::Error> {
         ));
     };
 
-    let manga_id = match segments[2].parse::<u32>() {
+    let index = match segments[2].parse::<u32>() {
         Ok(res) => res,
         Err(_) => {
             return Err(ClapError::Error::raw(
@@ -137,9 +132,18 @@ fn parse_url(s: &str) -> Result<(u32, Option<PartialManga>), ClapError::Error> {
         }
     };
 
-    let partial = PartialManga { url };
+    let is_oneshot = segments[1] == "one_shot";
 
-    return Ok((manga_id, Some(partial)));
+    let slug = segments[3].to_string();
+
+    let partial = SerieUrlInfo {
+        url: url.to_string(),
+        index,
+        slug,
+        is_oneshot,
+    };
+
+    return Ok((index, Some(partial)));
 }
 
 fn main() {
@@ -153,22 +157,21 @@ fn main() {
         panic!("we cant get from cache and we cant fecth due to we have not the url.");
     }
 
-    let manga: Manga = match Manga::from_cache(&cache_path, &args.id.0.to_string()) {
+    let manga: Serie = match Serie::from_cache(&cache_path, &args.id.0.to_string()) {
         Ok(r) => r,
         Err(_) => {
             // we can get from cache
 
-            if args.id.1.is_none() {
+            let Some(part) = args.id.1 else {
                 panic!("we cant get from cache and we cant fecth due to we have not the url.");
-            }
+            };
 
-            let url = args.id.1.unwrap().url;
-            let index = args.id.0.to_string();
+            let index = args.id.0;
 
             println!("Caché no encontrada. Haciendo fetch de los datos.");
-            let response = fetch(&url.to_string()).expect("Error on fecth");
+            let response = fetch(&part.url.to_string()).expect("Error on fecth");
             let html_file = response.text().expect("Incorrect body");
-            let manga = Manga::from_html(url, html_file).expect("error on parsing");
+            let manga = Serie::from_html(part, &html_file).expect("error on parsing");
 
             if !args.no_cache {
                 let _ = manga.to_cache(&cache_path, &index.to_string());
@@ -188,7 +191,7 @@ fn main() {
     let chap_index: usize = 0;
     println!("chapter selected had the index {}", chap_index);
 
-    let url_chap_view = &manga.chapters[chap_index].views[0].link;
+    let url_chap_view = &manga.chapters[chap_index].providers[0].link;
     let chap_name = &manga.chapters[chap_index].name;
     let ss = fetch(&url_chap_view).unwrap().text().unwrap();
     let _ = fs::write("test.html", &ss);
@@ -196,7 +199,7 @@ fn main() {
     println!("we got the urls for the chapter");
 
     // Itera sobre las url y trata de descargar las imagenes.
-    let folder_chapter = cache_path.join(manga.index.to_string()).join(chap_name);
+    let folder_chapter = cache_path.join(manga.url_info.index.to_string()).join(chap_name);
     let mut images_path: Vec<PathBuf> = Vec::new();
     let _ = fs::create_dir_all(folder_chapter.clone());
     println!("we'll start fetching images");
