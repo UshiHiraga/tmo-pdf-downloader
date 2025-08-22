@@ -1,8 +1,8 @@
 mod errors;
 mod models;
 mod utils;
-use models::serie::Manga;
 use models::pages::ChapterParser;
+use models::serie::Manga;
 use printpdf::PdfSaveOptions;
 
 use utils::fetch;
@@ -33,8 +33,8 @@ fn get_cache_path() -> PathBuf {
 #[command(version, about, long_about = None)]
 struct Args {
     /// ID del manga o manwha a descargar
-    #[arg(required = true, value_parser = MangaId::from_str )]
-    id: MangaId,
+    #[arg(required = true, value_parser = parse_url )]
+    id: (u32, Option<PartialManga>),
 
     // El grupo de argumentos para la selección de capítulos
     /// Número de capítulo a descargar
@@ -78,70 +78,68 @@ enum FormatOutput {
     Images,
 }
 
-
-#[derive(Debug, Clone)]
-enum MangaId {
-    FromIndex(u32),
-    FromUrl(url::Url, u32),
+#[derive(Clone)]
+struct PartialManga {
+    url: Url,
 }
 
-impl MangaId {
-    fn from_str(s: &str) -> Result<Self, ClapError::Error> {
-        // Try to parse as a numeric ID.
-        if let Ok(index) = s.parse::<u32>() {
-            return Ok(MangaId::FromIndex(index));
-        };
+fn parse_url(s: &str) -> Result<(u32, Option<PartialManga>), ClapError::Error> {
+    // Try to parse as a numeric ID.
+    if let Ok(index) = s.parse::<u32>() {
+        return Ok((index, None));
+    };
 
-        // If it's not a number, try to parse as a URL.
-        let url = match Url::parse(s) {
-            Ok(u) => u,
-            Err(_) => {
-                return Err(ClapError::Error::raw(
-                    ClapError::ErrorKind::InvalidValue,
-                    "The value must be a numeric ID or a valid URL.",
-                ));
-            }
-        };
-
-        // Validate the URL host
-        if url.host_str() != Some("zonatmo.com") {
+    // If it's not a number, try to parse as a URL.
+    let url = match Url::parse(s) {
+        Ok(u) => u,
+        Err(_) => {
             return Err(ClapError::Error::raw(
                 ClapError::ErrorKind::InvalidValue,
-                "The URL is not from zonatmo.com.",
+                "The value must be a numeric ID or a valid URL.",
             ));
-        };
+        }
+    };
 
-        // Get the path segments
-        let segments: Vec<&str> = match url.path_segments() {
-            Some(s) => s.collect(),
-            None => {
-                return Err(ClapError::Error::raw(
-                    ClapError::ErrorKind::InvalidValue,
-                    "The TMO URL must have a path with segments.",
-                ));
-            }
-        };
+    // Validate the URL host
+    if url.host_str() != Some("zonatmo.com") {
+        return Err(ClapError::Error::raw(
+            ClapError::ErrorKind::InvalidValue,
+            "The URL is not from zonatmo.com.",
+        ));
+    };
 
-        // Validate the path structure and extract the ID
-        if segments.len() < 4 || segments[0] != "library" {
+    // Get the path segments
+    let segments: Vec<&str> = match &url.path_segments() {
+        Some(s) => s.clone().collect(),
+        None => {
             return Err(ClapError::Error::raw(
                 ClapError::ErrorKind::InvalidValue,
-                "Invalid URL format. It should be similar to https://zonatmo.com/library/manga/12345/name.",
+                "The TMO URL must have a path with segments.",
             ));
-        };
+        }
+    };
 
-        let manga_id = match segments[2].parse::<u32>() {
-            Ok(res) => res,
-            Err(_) => {
-                return Err(ClapError::Error::raw(
-                    ClapError::ErrorKind::InvalidValue,
-                    "The URL does not contain a valid numeric manga ID.",
-                ));
-            }
-        };
+    // Validate the path structure and extract the ID
+    if segments.len() < 4 || segments[0] != "library" {
+        return Err(ClapError::Error::raw(
+            ClapError::ErrorKind::InvalidValue,
+            "Invalid URL format. It should be similar to https://zonatmo.com/library/manga/12345/name.",
+        ));
+    };
 
-        return Ok(MangaId::FromUrl(url, manga_id));
-    }
+    let manga_id = match segments[2].parse::<u32>() {
+        Ok(res) => res,
+        Err(_) => {
+            return Err(ClapError::Error::raw(
+                ClapError::ErrorKind::InvalidValue,
+                "The URL does not contain a valid numeric manga ID.",
+            ));
+        }
+    };
+
+    let partial = PartialManga { url };
+
+    return Ok((manga_id, Some(partial)));
 }
 
 fn main() {
@@ -151,23 +149,22 @@ fn main() {
 
     let cache_path = get_cache_path();
 
-    let manga: Manga = match args.id {
-        MangaId::FromIndex(index) => {
-            if args.no_cache {
-                panic!("we cant get from cache.");
+    if args.no_cache && args.id.1.is_none() {
+        panic!("we cant get from cache and we cant fecth due to we have not the url.");
+    }
+
+    let manga: Manga = match Manga::from_cache(&cache_path, &args.id.0.to_string()) {
+        Ok(r) => r,
+        Err(_) => {
+            // we can get from cache
+
+            if args.id.1.is_none() {
+                panic!("we cant get from cache and we cant fecth due to we have not the url.");
             }
 
-            match Manga::from_cache(&cache_path, &index.to_string()) {
-                Ok(manga) => {
-                    println!("Got from cache");
-                    manga
-                }
-                Err(_) => {
-                    panic!("{}", "no cache");
-                }
-            }
-        }
-        MangaId::FromUrl(url, index) => {
+            let url = args.id.1.unwrap().url;
+            let index = args.id.0.to_string();
+
             println!("Caché no encontrada. Haciendo fetch de los datos.");
             let response = fetch(&url.to_string()).expect("Error on fecth");
             let html_file = response.text().expect("Incorrect body");
@@ -212,7 +209,10 @@ fn main() {
         println!("image {} saved on disk.", i);
         images_path.push(path);
     }
-    println!("all the fetch ellpased {} seconds",fetching_time.elapsed().as_secs());
+    println!(
+        "all the fetch ellpased {} seconds",
+        fetching_time.elapsed().as_secs()
+    );
 
     // 4
     // crea el pdf
